@@ -1,147 +1,20 @@
-import numpy as np
-import matplotlib.pyplot as plt
-import pandas as pd
 import glob
-import sqlite3
-from scipy.optimize import curve_fit
 import re
 from pathlib import Path
-from os.path import exists
-import os
-from jackknife import jackknife
-from scipy.stats import kurtosis, skew
-from scipy.odr import *
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
-p = Path('.')
+from scipy.odr import Model, RealData, ODR
+from scipy.stats import kurtosis, skew
+from jackknife import jackknife
+from analyzerUtilities import match_filename
+from fitFunctions import *
+
+# Configure Matplotlib for LaTeX integration and style
 plt.rcParams['text.usetex'] = True
 plt.style.use('bmh')
 
-identifierPattern = r"m2_(-?\d+\.?\d*)beta(-?\d+\.?\d*)lambda(-?\d+\.?\d*)kappa(-?\d+\.?\d*)l(\d*)t(\d*)bc([ptc])\.dat"
-genericPattern = rf"([a-zA-Z0-9]*){identifierPattern}"
-
-def match_filename(filename):
-    match = re.match(genericPattern, filename)
-    if match:
-        obs_name, m2, beta, lam, kappa, l, t, bc = match.groups()
-        return {
-            'obs_name': obs_name,
-            'm2': m2,
-            'beta': beta,
-            'lam': lam,
-            'kappa': kappa,
-            'l': l,
-            't': t,
-            'bc': bc
-        }
-    return None
-
-dataFramesList= []
-importFromPickled = True
-if not importFromPickled:
-    for filename in glob.glob("*.dat"):
-        match = re.match(genericPattern, filename)
-        if match:
-            d = match_filename(filename)
-            df = pd.read_csv(filename, sep=" ", header=None)
-            if df.shape[1] == 1:
-                obs_col = np.array(df.iloc[:, 0].tolist())
-                # Explode the data for files that have one column
-                df = pd.DataFrame({'Obs': obs_col})
-                df = df.explode(['Obs'],ignore_index=True)
-            elif df.shape[1] == 2:
-                # Explode the data for files that have two columns
-                time_col = np.array(df.iloc[:, 0].tolist())
-                obs_col = np.array(df.iloc[:, 1].tolist())
-                df = pd.DataFrame({'Time': time_col, 'Obs': obs_col})
-                df = df.explode(['Obs','Time'],ignore_index=True)
-            else:
-                # Handle cases where the data has more than two columns
-                raise ValueError("Data has more than two columns")
-            
-            # Add the metadata to the dataframe
-            for key, value in d.items():
-                df[key] = value
-            dataFramesList.append(df)
-    df = pd.concat(dataFramesList, ignore_index=True)
-    df.to_pickle("data.pkl")
-else:
-    df = pd.read_pickle("data.pkl").reset_index(drop=True)
-
-df_plaq = df[df['obs_name'] == 'rect1x1'].reset_index(drop=True).drop(columns=['obs_name','Time'])
-df_higgsOff = df_plaq[df_plaq['kappa'] == '0.000000'].reset_index(drop=True).drop(columns=['kappa'])
-df_higgsOn = df_plaq[df_plaq['kappa'] == '1.000000'].reset_index(drop=True).drop(columns=['kappa'])
-
-print(df['m2'].unique())
-print(df['beta'].unique())
-
-for m2Value in df_higgsOn['m2'].unique():
-    fig,ax = plt.subplots(1,1,figsize=(8,6))
-    
-    ax.set_title(r'\textbf{String tension $m^2 = %s$}' % m2Value)
-    ax.set_xlabel(r'$1/g^2$')
-    ax.set_ylabel(r'$\chi$')
-    ax.set_yscale('log')
-    ax.set_ylim(0.1,11)
-    ax.set_yticks([0.1,1,10])
-    ax.set_yticklabels([r'$0.1$',r'$1$',r'$10$'])
-    ax.set_xticks([0.0,0.25,0.5,0.75,1.0])
-    ax.set_xticklabels([r'$0$',r'$0.25$',r'$0.5$',r'$0.75$',r'$1$'])
-    # Higgs off
-    X = []
-    Y = []
-    Yerr = []
-    for beta in df_higgsOff['beta'].unique():
-        x = df_higgsOff[(df_higgsOff['beta'] == beta) ]['Obs'].tolist()
-        if(len(x) < 20):
-            continue
-        ave,err = jackknife(x,10,np.mean)
-        if(ave > 0.0):
-            X.append(float(beta)/4.0)
-            Y.append(-np.log(ave))
-            Yerr.append(np.abs(err/ave))
-    ax.errorbar(X,Y,yerr=Yerr,fmt='o',label=r'\textbf{Higgs off}')
-    # Higgs on
-    X = []
-    Y = []
-    Yerr = []
-    
-    for beta in df_higgsOn['beta'].unique():
-        x = df_higgsOn[(df_higgsOn['beta'] == beta) & (df_higgsOff['m2'] ==m2Value)]['Obs'].tolist()
-        if(len(x) < 20):
-            continue
-        ave,err = jackknife(x,10,np.mean)
-        if(ave > 0.0):
-            X.append(float(beta)/4.0)
-            Y.append(-np.log(ave))
-            Yerr.append(np.abs(err/ave))
-    ax.errorbar(X,Y,yerr=Yerr,fmt='o',label=r'\textbf{Higgs on}')
-    ax.legend()
-    plt.savefig(f'stringTensionm2_{m2Value}.png')
-    plt.close()
-
-# plots Higgs square for each beta
-df_higgsSquare = df[(df['obs_name'] == 'higgsSquare') & (df['kappa'] =='1.000000')].reset_index(drop=True).drop(columns=['obs_name','Time','kappa'])
-for beta in [x for x in df_higgsSquare['beta'].unique() if float(x) ]:
-    for m2 in df_higgsSquare[df_higgsSquare['beta'] == beta]['m2'].unique():
-        X = []
-        Y = []
-        Yerr = []
-        x = df_higgsSquare[(df_higgsSquare['beta'] == beta) & (df_higgsSquare['m2'] ==m2)]['Obs']
-        if(len(x) < 20):
-            continue
-        ave,err = jackknife(x,10,np.mean)
-        if(ave > 0.0):
-            X.append(float(m2))
-            Y.append(ave)
-            Yerr.append(np.abs(err))
-    fig,ax = plt.subplots(1,1,figsize=(8,6))
-    ax.set_title(r'Higgs square $\beta = {}$'.format(beta))
-    ax.set_xlabel(r'$m^2$')
-    ax.set_ylabel(r'$\langle \phi^2 \rangle$')
-
-    ax.errorbar(X,Y,yerr=Yerr,fmt='o')
-    plt.savefig(f'higgsSquareBeta_{beta}.png')
-    plt.close()
 
 def transposeListOfList(lst):
     return [list(x) for x in zip(*lst)]
@@ -205,19 +78,9 @@ for beta in df_higgsMass['beta'].unique():
         continue
     plt.errorbar(workingm2,M,yerr=Merr,fmt='o')
     plt.savefig(f'higgsMassBeta_{beta}.png')
-
-        
     plt.close()
 
-def curveFitSigmoidal(x,a,b,c,d):
-    return a + b/(1.0 + np.exp(c*(x-d)))
 
-def fitFuncLinear(p,x):
-    return p[0]*x + p[1]
-
-
-def fitSigmoidal(p,x):
-    return p[0] + p[1]/(1.0 + np.exp(p[2]*(x-p[3])))
 
 def findPhaseTransition(lst):
     x = np.diff(np.array(lst))
